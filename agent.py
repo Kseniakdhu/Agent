@@ -1,4 +1,5 @@
 import re
+import json
 from typing import TypedDict, Optional, Dict, Any
 import openai
 from iris_model import IrisModel
@@ -6,15 +7,18 @@ from iris_model import IrisModel
 YANDEX_CLOUD_BASE_URL: str = "https://ai.api.cloud.yandex.net/v1"
 YANDEX_CLOUD_FOLDER: Optional[str] = "b1gtnnrn79ee3ee7oai8"
 YANDEX_CLOUD_MODEL: Optional[str] = "aliceai-llm/latest"
-#YANDEX_CLOUD_API_KEY: Optional[str] = 
+#YANDEX_CLOUD_API_KEY: Optional[str]
 
 
 # Состояние — это схема (TypedDict/Pydantic/dataclass), представляющая общие данные графа.
 #  Узлы читают состояние и возвращают его частичные обновления.
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
 	query: str
 	use_tool: Optional[bool]
 	final_answer: Optional[str]
+	action: Optional[str]
+	values: Optional[list]
+	tool_result: Optional[str]
 
 
 class Agent:
@@ -82,27 +86,50 @@ def parse_four_number(text: str):
 # Узел рассуждения: Понимает запрос и решает, или вызывать модель, или вызывает llm.
 def reasoning_node(state: AgentState) -> AgentState:
 	req = state.get("query", "")
-	# Если распознаны 4 числа — попросить вызвать инструмент
-	if parse_four_number(req):
-		return {**state, "use_tool": True, "final_answer": None}
-	# Иначе — спросить LLM и записать ответ
-	answer = call_alisa_llm(req)
-	return {**state, "use_tool": False, "final_answer": answer}
+	prompt = (
+		"У тебя есть инструмент `iris_predict`, который принимает ровно 4 числа "
+		"[sepal_length, sepal_width, petal_length, petal_width] и возвращает метку вида.\n"
+		"В ответе верни только JSON в одном из форматов:\n"
+		"{\"action\":\"predict\", \"values\": [число, число, число, число]}\n"
+		"или\n"
+		"{\"action\":\"answer\", \"answer\": \"текст\"}.\n"
+		"Если нужно вызвать модель — верни action=\"predict\" и values. Иначе верни answer.\n"
+		"User query: " + req
+	)
+	resp = call_alisa_llm(prompt)
+
+	try:
+		m = re.search(r"\{.*\}", resp, re.S)
+		if m:
+			obj = json.loads(m.group(0))
+			action = obj.get("action")
+			if action == "predict":
+				values = obj.get("values", [])
+				if isinstance(values, list) and len(values) == 4 and all(isinstance(x, (int, float)) for x in values):
+					return {**state, "use_tool": True, "values": values, "final_answer": None}
+				else:
+					return {**state, "use_tool": False, "final_answer": "LLM предложила некорректные значения для predict."}
+			else:
+				return {**state, "use_tool": False, "final_answer": obj.get("answer")}
+	except Exception:
+		pass
+
+	return {**state, "use_tool": False, "final_answer": resp}
 
 #Узел поиска: моделирует вызов модели и возвращает результат
 def action_node(state: AgentState) -> AgentState:
-	req = state.get("query", "")
-	vals = parse_four_number(req)
-	if vals:
+	vals = state.get("values")
+	if vals and isinstance(vals, list) and len(vals) == 4:
 		model = IrisModel()
 		pred = model.predict(vals)
-		return {**state, "use_tool": False, "final_answer": pred}
-	# Если чисел нет, попробуем найти имя вида — если найдено, вернуть текст.
+		return {**state, "use_tool": False, "tool_result": pred, "final_answer": pred}
+
+	req = state.get("query", "")
 	match = re.search(r"(Iris[- ]\w+|setosa|versicolor|virginica|ирис [\w-]+)", req, re.I)
 	if match:
 		species = match.group(0)
 		return {**state, "use_tool": False, "final_answer": f"Найден вид: {species}. Дополнительной информации в агенте нет."}
-	# Ничего не найдено — инструмент отработал, но результата нет: вернём use_tool=False и пустой final_answer
+
 	return {**state, "use_tool": False, "final_answer": None}
 
 if __name__ == "__main__":
