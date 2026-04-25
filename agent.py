@@ -5,10 +5,9 @@ import openai
 from iris_model import IrisModel
 
 YANDEX_CLOUD_BASE_URL: str = "https://ai.api.cloud.yandex.net/v1"
-YANDEX_CLOUD_FOLDER: Optional[str] = "b1gtnnrn79ee3ee7oai8"
+YANDEX_CLOUD_FOLDER: Optional[str] = "b1gtnnrn79ee3ee7oai8" 
 YANDEX_CLOUD_MODEL: Optional[str] = "aliceai-llm/latest"
-#YANDEX_CLOUD_API_KEY: Optional[str]
-
+YANDEX_CLOUD_API_KEY: Optional[str] = #
 
 # Состояние — это схема (TypedDict/Pydantic/dataclass), представляющая общие данные графа.
 #  Узлы читают состояние и возвращают его частичные обновления.
@@ -20,7 +19,6 @@ class AgentState(TypedDict, total=False):
 	values: Optional[list]
 	tool_result: Optional[str]
 
-
 class Agent:
 	def __init__(self):
 		pass
@@ -29,24 +27,22 @@ class Agent:
 		s: AgentState = {
 			"query": state.get("query", ""),
 			"use_tool": False,
-			"final_answer": None,
+			"final_answer": None, 
 		}
 		s = reasoning_node(s)
+
 		if s.get("use_tool"):
 			s = action_node(s)
-		if s.get("final_answer") is None:
-			s = reasoning_node(s)
 		return s
 
-# Узел внешнего инструмента
 def call_alisa_llm(prompt: str) -> str:
-	
 	try:
 		client = openai.OpenAI(
 			api_key=YANDEX_CLOUD_API_KEY,
 			base_url=YANDEX_CLOUD_BASE_URL,
 			project=YANDEX_CLOUD_FOLDER,
 		)
+
 		resp = client.responses.create(
 			model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
 			temperature=0.3,
@@ -54,38 +50,20 @@ def call_alisa_llm(prompt: str) -> str:
 			input=prompt,
 			max_output_tokens=500,
 		)
+
 		if hasattr(resp, "output_text") and resp.output_text:
 			return resp.output_text
-		if hasattr(resp, "output"):
-			try:
-				parts = []
-				for item in resp.output:
-					if isinstance(item, dict) and "content" in item:
-						for c in item["content"]:
-							if isinstance(c, dict) and c.get("type") == "output_text":
-								parts.append(c.get("text", ""))
-				if parts:
-					return "\n".join(parts)
-			except Exception:
-				pass
+
 		return str(resp)
+	
 	except Exception as e:
+
 		return f"LLM call failed: {e}"
 
-# Функция для извлечения 4 чисел из текста, если они есть
-def parse_four_number(text: str):
-	nums = re.findall(r"[0-9]*\.?[0-9]+", text)
-	if len(nums) >= 4:
-		try:
-			vals = [float(n) for n in nums[:4]]
-			return vals
-		except Exception:
-			return None
-	return None
-
-# Узел рассуждения: Понимает запрос и решает, или вызывать модель, или вызывает llm.
 def reasoning_node(state: AgentState) -> AgentState:
+
 	req = state.get("query", "")
+
 	prompt = (
 		"У тебя есть инструмент `iris_predict`, который принимает ровно 4 числа "
 		"[sepal_length, sepal_width, petal_length, petal_width] и возвращает метку вида.\n"
@@ -118,17 +96,12 @@ def reasoning_node(state: AgentState) -> AgentState:
 
 #Узел поиска: моделирует вызов модели и возвращает результат
 def action_node(state: AgentState) -> AgentState:
+
 	vals = state.get("values")
 	if vals and isinstance(vals, list) and len(vals) == 4:
 		model = IrisModel()
 		pred = model.predict(vals)
 		return {**state, "use_tool": False, "tool_result": pred, "final_answer": pred}
-
-	req = state.get("query", "")
-	match = re.search(r"(Iris[- ]\w+|setosa|versicolor|virginica|ирис [\w-]+)", req, re.I)
-	if match:
-		species = match.group(0)
-		return {**state, "use_tool": False, "final_answer": f"Найден вид: {species}. Дополнительной информации в агенте нет."}
 
 	return {**state, "use_tool": False, "final_answer": None}
 
