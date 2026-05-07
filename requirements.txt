@@ -4,3 +4,5 @@ openai
 numpy
 scikit-learn
 pandas
+langgraph
+langchain

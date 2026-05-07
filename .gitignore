@@ -2,3 +2,6 @@
 ./__pycache__
 ./mypy_cache
 ./venv-1
+./.vscode
+./venv-2
+

@@ -1,119 +1,116 @@
-import re
-import json
-from typing import TypedDict, Optional, Dict, Any
-import openai
-from iris_model import IrisModel
+from typing import TypedDict, List, Annotated
+from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
+import os
+from langchain.tools import tool
+from langchain.messages import HumanMessage, SystemMessage
 
-YANDEX_CLOUD_BASE_URL: str = "https://ai.api.cloud.yandex.net/v1"
-YANDEX_CLOUD_FOLDER: Optional[str] = "b1gtnnrn79ee3ee7oai8" 
-YANDEX_CLOUD_MODEL: Optional[str] = "aliceai-llm/latest"
-YANDEX_CLOUD_API_KEY: Optional[str] = #
+import joblib
+import numpy as np
+import pandas as pd
 
-# Состояние — это схема (TypedDict/Pydantic/dataclass), представляющая общие данные графа.
-#  Узлы читают состояние и возвращают его частичные обновления.
-class AgentState(TypedDict, total=False):
-	query: str
-	use_tool: Optional[bool]
-	final_answer: Optional[str]
-	action: Optional[str]
-	values: Optional[list]
-	tool_result: Optional[str]
 
-class Agent:
-	def __init__(self):
-		pass
+llm = ChatOpenAI(
+    model_name='gpt-4o-mini',
+    temperature=0,
+    openai_api_base='https://api.vsegpt.ru/v1',
+    openai_api_key= # KEY
+)
 
-	def invoke(self, state: Dict[str, Any]) -> Dict[str, Any]:
-		s: AgentState = {
-			"query": state.get("query", ""),
-			"use_tool": False,
-			"final_answer": None, 
-		}
-		s = reasoning_node(s)
+def load_model(path="iris_model.pkl"):
+    global model, trained_feature_names
+    try:
+        model = joblib.load(path)
+        trained_feature_names = getattr(model, "feature_names_in_", None)
+        return True
+    except Exception:
+        model = None
+        trained_feature_names = None
+        return False
 
-		if s.get("use_tool"):
-			s = action_node(s)
-		return s
+def iris_model_tool(text: str) -> str:
+    if model is None:
+        return "Ошибка: модель не загружена"
+    parts = str(text).replace(",", " ").split()
+    if len(parts) != 4:
+        return "Error: provide 4 numeric features, e.g. '5.1 3.5 1.4 0.2'"
+    try:
+        feats = np.array([float(p) for p in parts]).reshape(1, -1)
+    except Exception:
+        return "Error: features must be numeric"
+    if trained_feature_names is not None:
+        pred = model.predict(pd.DataFrame(feats, columns=trained_feature_names))[0]
+    else:
+        pred = model.predict(feats)[0]
+    names = ["Iris-setosa", "Iris-versicolor", "Iris-virginica"]
+    try:
+        return f"Вид ириса: {names[int(pred)]}"
+    except Exception:
+        return f"Вид ириса: {pred}"
+    
 
-def call_alisa_llm(prompt: str) -> str:
-	try:
-		client = openai.OpenAI(
-			api_key=YANDEX_CLOUD_API_KEY,
-			base_url=YANDEX_CLOUD_BASE_URL,
-			project=YANDEX_CLOUD_FOLDER,
-		)
+class State(TypedDict):
+    message: Annotated[List, "add_message"]
+    
+def call_model(state: State):
+    if len(state['message']) == 1 and isinstance(state['message'][0], HumanMessage):
+        message = [
+            SystemMessage(content=(
+                "You are a smart machine and you have to classify iris flowers by parameters. "
+                "You have a tool (iris_model) which is already trained and makes a prediction. "
+                "You will receive a message from the user as input; if it contains numeric features or explicit request to predict the iris species, call the tool and return its answer. "
+                "Otherwise just answer the question without calling the tool."
+            )),
+            state['message'][0],
+        ]
+    else:
+        message = state['message']
 
-		resp = client.responses.create(
-			model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
-			temperature=0.3,
-			instructions="",
-			input=prompt,
-			max_output_tokens=500,
-		)
+    response = llm.invoke(message)
+    if isinstance(response, (list, tuple)):
+        resp_val = list(response)
+    else:
+        resp_val = [response]
+    return {'message': resp_val}
+        
+def tools_node(state: State):
+    last = state['message'][-1]
+    text = getattr(last, 'content', str(last))
+    parts = str(text).replace(',', ' ').split()
+    if model is None:
+        res = 'Ошибка: модель не загружена'
+    elif len(parts) >= 4:
+        try:
+            feats = np.array([float(p) for p in parts[:4]]).reshape(1, -1)
+            if trained_feature_names is not None:
+                pred = model.predict(pd.DataFrame(feats, columns=trained_feature_names))[0]
+            else:
+                pred = model.predict(feats)[0]
+            names = ["Iris-setosa", "Iris-versicolor", "Iris-virginica"]
+            try:
+                res = f"Вид ириса: {names[int(pred)]}"
+            except Exception:
+                res = f"Вид ириса: {pred}"
+        except Exception:
+            res = 'Error: unable to parse numeric features'
+    else:
+        res = 'No numeric features found; nothing to predict.'
+    state.setdefault('message', []).append(SystemMessage(content=res))
+    return {'message': state['message']}
 
-		if hasattr(resp, "output_text") and resp.output_text:
-			return resp.output_text
+graph = StateGraph(State)
+graph.add_node('model', call_model)
+graph.add_node('tools', tools_node)
+graph.set_entry_point('model')
 
-		return str(resp)
+def should_continue(state: State):
+    last_message = state['message'][-1]
+    if hasattr(last_message, 'tools_calls') and last_message.tools_calls:
+        return 'tools'
+    return END
+
+graph.add_conditional_edges('model', should_continue)
+graph.add_edge('tools', 'model')
+agent_graph = graph.compile() 
+
 	
-	except Exception as e:
-
-		return f"LLM call failed: {e}"
-
-def reasoning_node(state: AgentState) -> AgentState:
-
-	req = state.get("query", "")
-
-	prompt = (
-		"У тебя есть инструмент `iris_predict`, который принимает ровно 4 числа "
-		"[sepal_length, sepal_width, petal_length, petal_width] и возвращает метку вида.\n"
-		"В ответе верни только JSON в одном из форматов:\n"
-		"{\"action\":\"predict\", \"values\": [число, число, число, число]}\n"
-		"или\n"
-		"{\"action\":\"answer\", \"answer\": \"текст\"}.\n"
-		"Если нужно вызвать модель — верни action=\"predict\" и values. Иначе верни answer.\n"
-		"User query: " + req
-	)
-	resp = call_alisa_llm(prompt)
-
-	try:
-		m = re.search(r"\{.*\}", resp, re.S)
-		if m:
-			obj = json.loads(m.group(0))
-			action = obj.get("action")
-			if action == "predict":
-				values = obj.get("values", [])
-				if isinstance(values, list) and len(values) == 4 and all(isinstance(x, (int, float)) for x in values):
-					return {**state, "use_tool": True, "values": values, "final_answer": None}
-				else:
-					return {**state, "use_tool": False, "final_answer": "LLM предложила некорректные значения для predict."}
-			else:
-				return {**state, "use_tool": False, "final_answer": obj.get("answer")}
-	except Exception:
-		pass
-
-	return {**state, "use_tool": False, "final_answer": resp}
-
-#Узел поиска: моделирует вызов модели и возвращает результат
-def action_node(state: AgentState) -> AgentState:
-
-	vals = state.get("values")
-	if vals and isinstance(vals, list) and len(vals) == 4:
-		model = IrisModel()
-		pred = model.predict(vals)
-		return {**state, "use_tool": False, "tool_result": pred, "final_answer": pred}
-
-	return {**state, "use_tool": False, "final_answer": None}
-
-if __name__ == "__main__":
-	print("Введите вариант запроса:\n" \
-    "1) 4 числа: ширина и длина чашелистика, ширина и длина лепестка соответствено, для определения вида ириса\n" \
-    "2) запрос о дополнительной информации о каком-то виде ириса.")
-	a = Agent()
-	while True:
-		req = input("Запрос: ").strip()
-		if not req:
-			break
-		res = a.invoke({"query": req})
-		print("Результат:")
-		print(res.get("final_answer"))
